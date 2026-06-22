@@ -1942,3 +1942,101 @@ summary {
 .tooltip:hover .tooltiptext {
     visibility: visible;
 }
+/* ===== multiplayer menu + HUD ===== */
+#mp-menu {
+    position: absolute;
+    top: 50%;
+    right: 40px;
+    transform: translateY(-50%);
+    z-index: 30;
+    width: 230px;
+    padding: 16px;
+    background: rgba(255, 255, 255, 0.92);
+    border: 2px solid #333;
+    border-radius: 10px;
+    font-family: Arial, sans-serif;
+    user-select: none;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+
+#mp-menu .mp-title {
+    font-size: 18px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    color: #333;
+    text-align: center;
+    margin-bottom: 12px;
+}
+
+#mp-menu .mp-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.mp-btn {
+    flex: 1;
+    padding: 9px 6px;
+    font-size: 14px;
+    font-family: Arial, sans-serif;
+    color: #333;
+    background: #fff;
+    border: 2px solid #333;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.mp-btn:hover {
+    background: #eee;
+}
+
+.mp-btn-pvp {
+    border-color: #b2243a;
+    color: #b2243a;
+}
+
+.mp-btn-pvp:hover {
+    background: #fbe9ec;
+}
+
+#mp-code {
+    flex: 1;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 9px;
+    font-size: 20px;
+    font-family: Arial, sans-serif;
+    text-align: center;
+    letter-spacing: 8px;
+    text-transform: uppercase;
+    border: 2px solid #333;
+    border-radius: 8px;
+    color: #333;
+}
+
+#mp-status {
+    margin-top: 10px;
+    font-size: 11px;
+    color: #777;
+    text-align: center;
+    min-height: 26px;
+    line-height: 1.3;
+}
+
+#net-hud {
+    display: none;
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 14;
+    padding: 6px 14px;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font-family: Arial, sans-serif;
+    font-size: 14px;
+    border-radius: 0 0 10px 10px;
+    pointer-events: none;
+    white-space: nowrap;
+}

@@ -459,6 +459,7 @@ const m = {
         }
     },
     death() {
+        if (net.role !== 'off' && net.onLocalDeath()) return //multiplayer: client arcade respawn / pvp round loss
         if (tech.isEigenstate && m.eigen.deathCount === 0) {
             m.eigen.deathCount++
             m.eigen.isAlive[m.eigen.state] = false

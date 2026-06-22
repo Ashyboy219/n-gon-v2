@@ -209,8 +209,10 @@ const mobs = {
     },
     deathCount: 0,
     mobSpawnWithHealth: 1,
+    spawnNetId: 0, //multiplayer: stable per-mob id for host->client sync
     setMobSpawnHealth() {
-        mobs.mobSpawnWithHealth = 0.88 ** (tech.mobSpawnWithHealth)
+        const pc = simulation.isMultiplayer ? net.playerCount : 1 //tougher mobs with more players (2p = 1.5x HP)
+        mobs.mobSpawnWithHealth = (0.88 ** (tech.mobSpawnWithHealth)) * (1 + 0.5 * (pc - 1))
     },
     //**********************************************************************************************
     //**********************************************************************************************
@@ -232,6 +234,7 @@ const mobs = {
             onHit: undefined,
             alive: true,
             index: i,
+            netId: (net.role !== 'off') ? ++mobs.spawnNetId : 0, //multiplayer: stable id for host->client mob sync (0 in single player)
             health: mobs.mobSpawnWithHealth,
             accelMag: 0.001 * simulation.accelScale,
             cd: 0, //game cycle when cooldown will be over
@@ -352,8 +355,10 @@ const mobs = {
             memory: 120, //default time to remember player's location
             locatePlayer() { // updates mob's memory of player location
                 this.seePlayer.recall = this.memory + Math.round(this.memory * Math.random()); //cycles before mob falls a sleep
-                this.seePlayer.position.x = player.position.x;
-                this.seePlayer.position.y = player.position.y;
+                //multiplayer co-op: the host's mobs chase the nearest of all players, not just the local one
+                const tgt = (net.role === 'host') ? net.nearestPlayer(this.position) : player.position
+                this.seePlayer.position.x = tgt.x;
+                this.seePlayer.position.y = tgt.y;
             },
             alertNearByMobs() {
                 //this.alertRange2 is set at the very bottom of this mobs, after mob is made
@@ -991,7 +996,8 @@ const mobs = {
                 }
             },
             damageScale() {
-                return ((spawn.mobDmgDoneByTier[this.tier] && level.levelsCleared < 14) ? spawn.mobDmgDoneByTier[this.tier] : spawn.dmgToPlayerByLevelsCleared())
+                const pc = simulation.isMultiplayer ? net.playerCount : 1 //mobs hit a bit harder with more players (2p = 1.25x)
+                return (1 + 0.25 * (pc - 1)) * ((spawn.mobDmgDoneByTier[this.tier] && level.levelsCleared < 14) ? spawn.mobDmgDoneByTier[this.tier] : spawn.dmgToPlayerByLevelsCleared())
             },
             damage(dmg, isBypassShield = false) { //damage taken by this mob 
                 if ((!this.isShielded || isBypassShield) && this.alive) {
@@ -1204,6 +1210,7 @@ const mobs = {
             maxMobBody: 40,
             isDropPowerUp: true,
             death() {
+                if (net.role === 'host' && this.netId) net.send({ t: 'mobdead', i: this.netId }) //multiplayer: tell clients
                 if (tech.collidePowerUps && this.isDropPowerUp) powerUps.randomize(this.position) //needs to run before onDeath spawns power ups
                 this.onDeath(this); //custom death effects
                 this.removeConsBB();

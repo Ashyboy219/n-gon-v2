@@ -50,6 +50,27 @@
         <text stroke='none' fill='#333' stroke-width="2" font-size="30px" font-family="Arial, sans-serif" x="10" y="32">experiment</text>
     </svg>
 
+    <!-- multiplayer menu (co-op with scaled mobs, and pvp 1v1) -->
+    <div id="mp-menu">
+        <div class="mp-title">MULTIPLAYER</div>
+        <div class="mp-row">
+            <button class="mp-btn" onclick="net.hostCoop()">host co-op</button>
+            <button class="mp-btn" onclick="net.joinCoop(document.getElementById('mp-code').value)">join co-op</button>
+        </div>
+        <div class="mp-row">
+            <input id="mp-code" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false"
+                oninput="this.value=this.value.toUpperCase()">
+        </div>
+        <div class="mp-row">
+            <button class="mp-btn mp-btn-pvp" onclick="net.hostPvp()">host pvp 1v1</button>
+            <button class="mp-btn mp-btn-pvp" onclick="net.joinPvp(document.getElementById('mp-code').value)">join
+                pvp</button>
+        </div>
+        <div id="mp-status">enter a 4-letter room code to join, or host to get one</div>
+    </div>
+    <!-- in-game room/score readout -->
+    <div id="net-hud"></div>
+
 
     <div id='info'>
         <div>
@@ -351,6 +372,11 @@
     <script src="js/level.js"></script>
     <script src="js/lore.js"></script>
     <script src="js/engine.js"></script>
+    <!-- multiplayer: realtime relay + netcode (loaded before index.js so the `net` global exists) -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="js/net-transport.js"></script>
+    <script src="js/net.js"></script>
+    <script src="js/net-pvp.js"></script>
     <script src="js/index.js"></script>
 </body>
 

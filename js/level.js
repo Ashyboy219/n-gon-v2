@@ -215,6 +215,7 @@ const level = {
         simulation.draw.setPaths();
         b.respawnBots();
         m.resetHistory();
+        if (net.role === 'host' && net.mode === 'coop') net.broadcastGeometry(); //multiplayer: sync level geometry to clients
 
         m.fieldCDcycle = m.cycle + 15;
         tech.isDeathTechTriggered = false
