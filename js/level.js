@@ -95,6 +95,7 @@ const level = {
         // powerUps.chooseRandomPowerUp(-3175, 925);
     },
     start() {
+        if (typeof modes !== 'undefined' && modes.active) return modes.buildLevel() //local modes build their own arena
         level.setConstraints()
         if (level.levelsCleared === 0) { //this code only runs on the first level
             // if (false) {
@@ -215,6 +216,7 @@ const level = {
         simulation.draw.setPaths();
         b.respawnBots();
         m.resetHistory();
+        if (net.role === 'host' && net.mode === 'coop') net.broadcastGeometry(); //multiplayer: sync level geometry to clients
 
         m.fieldCDcycle = m.cycle + 15;
         tech.isDeathTechTriggered = false

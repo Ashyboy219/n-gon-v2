@@ -207,11 +207,13 @@ const spawn = {
 
     // original with 10% + number of mobs chance to fail
     spawnChance(chance) {
+        if (net.role === 'client') return false //multiplayer clients never spawn mobs locally — the host owns the world
         if (Math.random() < 0.1 + mob.length) false
         // const mobs = 12 * Math.log10(5 * level.levelsCleared)
-        const mobs = 5 * Math.log(level.levelsCleared + 1) * (localSettings.isHideHUD ? 0.5 : 1)
+        const pc = simulation.isMultiplayer ? net.playerCount : 1 //scale horde size (sub-linearly) with party size
+        const mobs = 5 * Math.log(level.levelsCleared + 1) * (localSettings.isHideHUD ? 0.5 : 1) * (0.6 + 0.4 * pc)
         const maxMobs = (simulation.difficultyMode === 1) ? 2 : mobs //localSettings.isHideHUD
-        return (Math.random() < chance + 0.35 * level.levelsCleared) && (mob.length < maxMobs)
+        return (Math.random() < (chance + 0.35 * level.levelsCleared) * (0.7 + 0.3 * pc)) && (mob.length < maxMobs)
     },
 
     // original

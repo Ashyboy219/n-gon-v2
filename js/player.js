@@ -459,6 +459,8 @@ const m = {
         }
     },
     death() {
+        if (typeof modes !== 'undefined' && modes.active && modes.onPlayerDeath()) return //local modes: round loss / game over
+        if (net.role !== 'off' && net.onLocalDeath()) return //multiplayer: client arcade respawn / pvp round loss
         if (tech.isEigenstate && m.eigen.deathCount === 0) {
             m.eigen.deathCount++
             m.eigen.isAlive[m.eigen.state] = false

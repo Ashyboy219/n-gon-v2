@@ -1,6 +1,8 @@
 
 .jsbeautifyrc
+.claude/
 .DS_Store
 .DS_Store
 .DS_Store
 js/workspace.code-workspace
+.vercel

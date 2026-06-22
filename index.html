@@ -50,6 +50,52 @@
         <text stroke='none' fill='#333' stroke-width="2" font-size="30px" font-family="Arial, sans-serif" x="10" y="32">experiment</text>
     </svg>
 
+    <!-- multiplayer menu (co-op with scaled mobs, and pvp 1v1) -->
+    <div id="mp-menu">
+        <div class="mp-title">MULTIPLAYER</div>
+        <div class="mp-row">
+            <button class="mp-btn" onclick="net.hostCoop()">host co-op</button>
+            <button class="mp-btn" onclick="net.joinCoop(document.getElementById('mp-code').value)">join co-op</button>
+        </div>
+        <div class="mp-row">
+            <input id="mp-code" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false"
+                oninput="this.value=this.value.toUpperCase()">
+        </div>
+        <div class="mp-row">
+            <button class="mp-btn mp-btn-pvp" onclick="net.hostPvp()">host pvp 1v1</button>
+            <button class="mp-btn mp-btn-pvp" onclick="net.joinPvp(document.getElementById('mp-code').value)">join
+                pvp</button>
+        </div>
+        <div id="mp-status">enter a 4-letter room code to join, or host to get one</div>
+    </div>
+
+    <!-- local single-machine modes: couch 1v1, vs bots, wave survival -->
+    <div id="practice-menu">
+        <div class="mp-title">LOCAL / SOLO</div>
+        <button class="mp-btn mp-btn-local" onclick="modes.localPvp()">couch 1v1</button>
+        <div class="mp-hint">P1: WASD + mouse aim + F/click fire · P2: arrows + , . aim + / fire</div>
+        <div class="mp-row mp-bots">
+            <select id="bot-diff" class="mp-select">
+                <option value="easy">easy</option>
+                <option value="normal" selected>normal</option>
+                <option value="hard">hard</option>
+                <option value="insane">insane</option>
+            </select>
+            <select id="bot-count" class="mp-select">
+                <option value="1">1 bot</option>
+                <option value="2">2 bots</option>
+                <option value="3">3 bots</option>
+                <option value="4">4 bots</option>
+            </select>
+        </div>
+        <button class="mp-btn mp-btn-local"
+            onclick="modes.botPvp(document.getElementById('bot-diff').value, parseInt(document.getElementById('bot-count').value))">fight
+            bots</button>
+        <button class="mp-btn mp-btn-wave" onclick="modes.waveMode()">wave survival</button>
+    </div>
+    <!-- in-game room/score readout -->
+    <div id="net-hud"></div>
+
 
     <div id='info'>
         <div>
@@ -351,6 +397,12 @@
     <script src="js/level.js"></script>
     <script src="js/lore.js"></script>
     <script src="js/engine.js"></script>
+    <!-- multiplayer: realtime relay + netcode (loaded before index.js so the `net` global exists) -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="js/net-transport.js"></script>
+    <script src="js/net.js"></script>
+    <script src="js/net-pvp.js"></script>
+    <script src="js/modes.js"></script>
     <script src="js/index.js"></script>
 </body>
 
