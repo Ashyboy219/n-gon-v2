@@ -95,6 +95,7 @@ const level = {
         // powerUps.chooseRandomPowerUp(-3175, 925);
     },
     start() {
+        if (typeof modes !== 'undefined' && modes.active) return modes.buildLevel() //local modes build their own arena
         level.setConstraints()
         if (level.levelsCleared === 0) { //this code only runs on the first level
             // if (false) {

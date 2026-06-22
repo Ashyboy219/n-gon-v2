@@ -2040,3 +2040,67 @@ summary {
     pointer-events: none;
     white-space: nowrap;
 }
+
+/* ===== local / solo practice menu ===== */
+#practice-menu {
+    position: absolute;
+    top: 50%;
+    left: 40px;
+    transform: translateY(-50%);
+    z-index: 30;
+    width: 250px;
+    padding: 16px;
+    background: rgba(255, 255, 255, 0.92);
+    border: 2px solid #333;
+    border-radius: 10px;
+    font-family: Arial, sans-serif;
+    user-select: none;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+
+#practice-menu .mp-btn {
+    width: 100%;
+    margin-bottom: 8px;
+}
+
+.mp-btn-local {
+    border-color: #1864ab;
+    color: #1864ab;
+}
+
+.mp-btn-local:hover {
+    background: #e7f1fb;
+}
+
+.mp-btn-wave {
+    border-color: #5f3dc4;
+    color: #5f3dc4;
+}
+
+.mp-btn-wave:hover {
+    background: #efeafc;
+}
+
+.mp-bots {
+    margin-bottom: 8px;
+}
+
+.mp-select {
+    flex: 1;
+    padding: 8px;
+    font-size: 14px;
+    font-family: Arial, sans-serif;
+    color: #333;
+    background: #fff;
+    border: 2px solid #333;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.mp-hint {
+    font-size: 10.5px;
+    color: #777;
+    line-height: 1.35;
+    margin: 2px 0 10px;
+    text-align: center;
+}

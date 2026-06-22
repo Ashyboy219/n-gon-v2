@@ -24,6 +24,7 @@ const simulation = {
         if (!m.isTimeDilated) mobs.loop();
         m.draw();
         if (net.role === 'host') net.hostFrame(); //multiplayer: draw remote players + broadcast world
+        if (modes.active) modes.update(); //local modes: round/wave state machine
         m.hold();
         level.customTopLayer();
         simulation.draw.drawMapPath();
@@ -35,6 +36,7 @@ const simulation = {
         simulation.runEphemera();
         ctx.restore();
         simulation.drawCursor();
+        if (modes.active) modes.drawOverlay(); //local modes: countdown / win overlay (screen space)
     },
     testingLoop() {
         simulation.gravity();
