@@ -62,6 +62,7 @@ class SupabaseTransport {
 
     send(obj) {
         if (!this.channel || !this.ready) return
+        obj._from = this.peerId // stamp the sender so receivers can sanity-check claimed ids (relay has no auth)
         this.channel.send({ type: "broadcast", event: "g", payload: obj })
     }
 

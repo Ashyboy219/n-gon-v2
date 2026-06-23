@@ -2105,8 +2105,10 @@ const powerUps = {
             polygonSides = 12
         }
         powerUp[index] = Matter.Bodies.polygon(x, y, polygonSides, size, properties);
+        powerUp[index].netId = (net.role === 'host') ? ++powerUps.spawnNetId : 0 //multiplayer: stable id so clients can claim this power up
         if (moving) Matter.Body.setVelocity(powerUp[index], { x: (Math.random() - 0.5) * 15, y: Math.random() * -9 - 3 });
         Composite.add(engine.world, powerUp[index]);
     },
+    spawnNetId: 0, //multiplayer: running id counter for power ups (host only)
     powerUpStorage: [],//used when power ups are sent to the next level (for the constraint, level.isNextLevelPowerUps)
 };
