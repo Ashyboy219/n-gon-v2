@@ -20,14 +20,24 @@ const net = {
     transport: null,
     players: {},          // id -> remote player record (everyone except me)
     ghostMobs: {},        // host netId -> {x,y,a,sides,r,fill,h, rx,ry,ra}
-    ghostPowerups: [],    // [{x,y,ty}]
+    ghostPowerups: [],    // [{x,y,ty,s,id}]
+    _pendingPickups: {},  // client: id -> {cycle,ty,x,y,s} awaiting the host's pickupOk
+    standins: {},         // client: host netId -> off-world Matter body in mob[] (damage target for array-iterating weapons)
+    ghostBodies: {},      // client: host body index -> {body, rx, ry, ra, lastSeen} kinematic dynamic bodies
     geoBodies: [],        // client: rebuilt static collision bodies for the shared world
+    geoPolys: [],         // client: raw serialized map polygons (exact host shapes, for rendering)
     lastGeo: null,        // host: cached geometry of the current level (for late joiners)
     spawn: { x: 0, y: -50 },
     TICK: 3,              // network send cadence (every Nth frame ~ 20Hz @ 60fps)
     SMOOTH: 0.35,         // remote entity render smoothing
     nextPeerNum: 1,       // host: next player id to hand out
     bulletCap: 18,        // max own-bullet positions broadcast per frame
+    // ---- security (relay model: behavioral guards only, no crypto) ----------
+    HIT_CAP: 2,           // max single mob-damage a client may report (≈200x a typical bullet)
+    DMG_CAP: 0.5,         // max single player-damage the host may apply to a client
+    _hitRate: {},         // host: peer -> {t, c} sliding-window hit-message counter
+    _hitSeen: {},         // host: "netId:peer" -> cycle, replay/dup suppression
+    hostDisconnected: false,
     hud: null,
     pvp: null,            // populated by net-pvp.js
 
@@ -138,8 +148,14 @@ const net = {
             case 'hit': // client -> host: my bullet damaged a mob
                 if (net.role === 'host') net.hostApplyMobHit(msg)
                 break
+            case 'pickup': // client -> host: I want to grab this power up
+                if (net.role === 'host') net.hostHandlePickup(msg)
+                break
+            case 'pickupOk': // host -> all: a power up was consumed (and by whom)
+                net.applyPickupOk(msg)
+                break
             case 'dmg': // host -> a client: you took damage
-                if (msg.id === net.myId) net.takeRemoteDamage(msg.d)
+                if (msg.id === net.myId) net.takeRemoteDamage(msg.d, msg._from)
                 break
             case 'pvphit': // opponent -> me: I was hit
                 if (net.mode === 'pvp' && msg.id === net.myId && net.pvp) net.pvp.takeHit(msg.d, msg.from)
@@ -197,14 +213,22 @@ const net = {
     },
     blankPlayer(id, peer) {
         const c = net.color(id)
-        return { id, peer, x: 0, y: 0, rx: 0, ry: 0, vx: 0, vy: 0, a: 0, h: 1, mh: 1, al: 1, fm: 0, fo: 0, cr: 0, yo: 49, gun: 0, bull: [], color: c, dmgCD: 0, lastSeen: 0 }
+        return { id, peer, x: 0, y: 0, rx: 0, ry: 0, vx: 0, vy: 0, a: 0, h: 1, mh: 1, al: 1, fm: 0, fo: 0, cr: 0, yo: 49, gun: 0, bull: [], color: c, dmgCD: 0, lastSeen: 0, og: 1, walk: 0, stepSize: 0, flip: -1 }
     },
     onPeerLeave(peer) {
+        let hostLeft = false
         for (const id in net.players) {
             if (net.players[id].peer === peer) {
+                if (Number(id) === 0) hostLeft = true
                 simulation.inGameConsole(`<em>player ${Number(id) + 1} left</em>`)
                 delete net.players[id]
             }
+        }
+        // co-op client losing the host: the authoritative world is gone — stop, don't strand the player
+        if (hostLeft && net.mode === 'coop' && net.role === 'client' && !net.hostDisconnected) {
+            net.hostDisconnected = true
+            net.status(`host left — session ended`)
+            simulation.inGameConsole(`<em>host disconnected — co-op session ended</em>`)
         }
         if (net.role === 'host') { net.onPlayerCountChange(); net.broadcastRoster() }
         if (net.mode === 'pvp' && net.role === 'host' && net.pvp) net.pvp.opponentLeft()
@@ -224,13 +248,13 @@ const net = {
             bull.push([Math.round(bullet[i].position.x), Math.round(bullet[i].position.y)])
         }
         net.send({
-            t: 'p', id: net.myId,
+            t: 'p', id: net.myId, cyc: simulation.cycle,
             x: Math.round(m.pos.x), y: Math.round(m.pos.y),
             vx: Math.round(player.velocity.x * 10) / 10, vy: Math.round(player.velocity.y * 10) / 10,
             a: Math.round(m.angle * 100) / 100,
             h: Math.round(m.health * 1000) / 1000, mh: Math.round(m.maxHealth * 100) / 100,
             al: m.alive ? 1 : 0, fm: m.fieldMode || 0, fo: input.field ? 1 : 0,
-            cr: m.crouch ? 1 : 0, yo: Math.round(m.yOff),
+            cr: m.crouch ? 1 : 0, yo: Math.round(m.yOff), og: m.onGround ? 1 : 0,
             gun: (b.activeGun == null ? -1 : b.activeGun),
             hue: net.myColor.hue, sat: net.myColor.sat, lit: net.myColor.light,
             bull
@@ -240,10 +264,13 @@ const net = {
         if (msg.id === net.myId) return
         const p = net.players[msg.id]
         if (!p) return // unknown id — ignore until the host's roster registers this player (anti-spoof + no orphan ghosts)
+        if (msg._from && p.peer && msg._from !== p.peer) return // claimed id must come from that id's registered peer (anti-spoof)
+        if (msg.cyc !== undefined) { if (p._cyc !== undefined && msg.cyc < p._cyc) return; p._cyc = msg.cyc } // drop out-of-order/stale state
         if (!p.lastSeen) { p.rx = msg.x; p.ry = msg.y } // snap on first sighting so the ghost doesn't fly in from (0,0)
         p.x = msg.x; p.y = msg.y; p.vx = msg.vx; p.vy = msg.vy; p.a = msg.a
         p.h = msg.h; p.mh = msg.mh; p.al = msg.al; p.fm = msg.fm; p.fo = msg.fo
         p.cr = msg.cr; p.yo = msg.yo; p.gun = msg.gun; p.bull = msg.bull || []
+        if (msg.og !== undefined) p.og = msg.og
         if (msg.hue !== undefined) p.color = { hue: msg.hue, sat: msg.sat, light: msg.lit }
         p.lastSeen = simulation.cycle
     },
@@ -254,6 +281,13 @@ const net = {
         for (let i = 0, len = mob.length; i < len && list.length < 60; i++) {
             const o = mob[i]
             if (!o.alive) continue
+            // compact flag byte: 1=shield, 2=stun, 4=slow, 8=boss, 16=mobBullet
+            let fl = 0
+            if (o.isShielded) fl |= 1
+            if (o.isStunned) fl |= 2
+            if (o.isSlowed) fl |= 4
+            if (o.isBoss) fl |= 8
+            if (o.isMobBullet) fl |= 16
             list.push({
                 i: o.netId,
                 x: Math.round(o.position.x), y: Math.round(o.position.y),
@@ -261,27 +295,39 @@ const net = {
                 s: o.vertices ? o.vertices.length : 6,
                 r: Math.round(o.radius || 20),
                 h: Math.round(o.health * 1000) / 1000,
-                f: o.fill
+                f: o.fill, fl
             })
         }
         const pu = []
         for (let i = 0, len = powerUp.length; i < len && pu.length < 30; i++) {
-            pu.push({ x: Math.round(powerUp[i].position.x), y: Math.round(powerUp[i].position.y), ty: powerUp[i].name })
+            pu.push({ x: Math.round(powerUp[i].position.x), y: Math.round(powerUp[i].position.y), ty: powerUp[i].name, s: Math.round(powerUp[i].size || 10), id: powerUp[i].netId })
         }
-        net.send({ t: 'w', cyc: simulation.cycle, lvl: level.onLevel, mob: list, pu })
+        // dynamic bodies (crates, printed blocks, and body-based level mechanisms: elevators/movers/doors)
+        const bd = []
+        for (let i = 0, len = body.length; i < len && bd.length < 30; i++) {
+            const o = body[i]
+            const v = o.vertices
+            const poly = []
+            for (let j = 0; j < v.length && j < 10; j++) poly.push([Math.round(v[j].x), Math.round(v[j].y)])
+            bd.push({ i, v: poly })
+        }
+        net.send({ t: 'w', cyc: simulation.cycle, lvl: level.onLevel, mob: list, pu, bd })
     },
     applyWorld(msg) {
-        // mobs
+        // mobs (render ghosts) + off-world stand-in damage targets
         const seen = {}
         for (const o of msg.mob) {
             seen[o.i] = true
             let g = net.ghostMobs[o.i]
             if (!g) g = net.ghostMobs[o.i] = { rx: o.x, ry: o.y, ra: o.a }
             g.x = o.x; g.y = o.y; g.a = o.a; g.sides = o.s; g.r = o.r; g.h = o.h; g.fill = o.f
+            g.fl = o.fl || 0
             g.lastSeen = simulation.cycle
+            net.syncStandin(o) // keep a stand-in body in mob[] so the joiner's weapons can hit it
         }
-        for (const i in net.ghostMobs) if (!seen[i]) delete net.ghostMobs[i]
+        for (const i in net.ghostMobs) if (!seen[i]) { net.removeStandin(i); delete net.ghostMobs[i] }
         net.ghostPowerups = msg.pu || []
+        net.syncGhostBodies(msg.bd || [])
         if (msg.lvl !== undefined) net.curLevel = msg.lvl
     },
 
@@ -298,15 +344,24 @@ const net = {
             t: 'geo', lvl: level.onLevel,
             v: verts,
             ex: Math.round(level.exit.x), ey: Math.round(level.exit.y),
-            en: Math.round(level.enter.x), eny: Math.round(level.enter.y)
+            en: Math.round(level.enter.x), eny: Math.round(level.enter.y),
+            bg: document.body.style.backgroundColor // match the host's per-level page background
         }
         net.spawn = { x: Math.round(level.enter.x) + 50, y: Math.round(level.enter.y) - 40 } // host respawn point
+        net._hitSeen = {} // netIds change each level — drop the stale replay cache
         net.send(net.lastGeo)
     },
     buildGeometry(msg) {
         net.clearWorldBodies()
+        // sanity-filter polygons (drop degenerate / absurd geometry a malformed or hostile host might send)
+        const polys = (msg.v || []).filter(poly =>
+            Array.isArray(poly) && poly.length >= 3 && poly.length <= 200 &&
+            poly.every(p => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]) && Math.abs(p[0]) < 1e6 && Math.abs(p[1]) < 1e6)
+        )
+        net.geoPolys = polys // keep the exact host polygons for rendering (collision bodies may be convex-decomposed)
+        if (msg.bg) document.body.style.backgroundColor = msg.bg
         const Bodies = Matter.Bodies, World = Matter.World
-        for (const poly of msg.v) {
+        for (const poly of polys) {
             if (poly.length < 3) continue
             const pts = poly.map(p => ({ x: p[0], y: p[1] }))
             let cx = 0, cy = 0
@@ -333,12 +388,16 @@ const net = {
         Matter.Body.setVelocity(player, { x: 0, y: 0 })
         m.health = m.maxHealth; if (m.displayHealth) m.displayHealth()
         net.ghostMobs = {}; net.curLevel = msg.lvl // always reset ghosts on (re)load, even for the same level number
+        net.clearStandins(); net.clearGhostBodies()
         net.status(`room ${net.roomCode} — playing`)
     },
     clearWorldBodies() {
         if (typeof Matter === 'undefined' || !engine || !engine.world) return
         for (const b2 of net.geoBodies) Matter.World.remove(engine.world, b2)
         net.geoBodies = []
+        net.geoPolys = []
+        net.clearGhostBodies()
+        net.clearStandins()
     },
 
     // ---- host: called once per host frame (from normalLoop) ----------------
@@ -370,8 +429,18 @@ const net = {
         }
     },
     hostApplyMobHit(msg) {
+        const peer = msg._from || 'unknown'
+        // rate limit: at most ~30 hit messages per peer per 30 cycles (half second)
+        const rl = net._hitRate[peer] || (net._hitRate[peer] = { t: simulation.cycle, c: 0 })
+        if (simulation.cycle - rl.t > 30) { rl.t = simulation.cycle; rl.c = 0 }
+        if (++rl.c > 30) return
+        // de-dupe a resent/replayed hit for the same mob from the same peer within a few cycles
+        const key = msg.i + ':' + peer
+        if (net._hitSeen[key] !== undefined && simulation.cycle - net._hitSeen[key] < 2) return
+        net._hitSeen[key] = simulation.cycle
+        const dmg = Math.max(0, Math.min(net.HIT_CAP, msg.d)) // clamp magnitude
         const o = net.mobByNetId(msg.i)
-        if (o && o.alive && o.damage) o.damage(Math.max(0, msg.d))
+        if (o && o.alive && o.damage) o.damage(dmg)
     },
     mobByNetId(id) {
         for (let i = 0, len = mob.length; i < len; i++) if (mob[i].netId === id) return mob[i]
@@ -391,9 +460,14 @@ const net = {
     },
 
     // ---- damage to my local player (sent by host in co-op) -----------------
-    takeRemoteDamage(d) {
+    takeRemoteDamage(d, from) {
         if (!m.alive || m.immuneCycle > m.cycle) return
-        m.takeDamage(d)
+        // only the host may damage a co-op client; clamp the magnitude
+        if (net.mode === 'coop' && net.role === 'client' && from !== undefined) {
+            const hostPeer = net.players[0] && net.players[0].peer
+            if (hostPeer && from !== hostPeer) return
+        }
+        m.takeDamage(Math.max(0, Math.min(net.DMG_CAP, d)))
         net.sendSelf()
     },
     // co-op death: arcade respawn instead of resetting the shared level (works for host AND client)
@@ -441,7 +515,7 @@ const net = {
         m.look()
         simulation.camera()
         net.drawGeometry()
-        if (net.mode === 'coop') { net.drawGhostMobs(); net.drawGhostPowerups() }
+        if (net.mode === 'coop') { net.drawGhostBodies(); net.drawGhostMobs(); net.drawGhostPowerups() }
         net.drawRemotePlayers()
         net.drawGhostBullets()
         m.draw()
@@ -450,15 +524,18 @@ const net = {
         b.bulletRemove()
         b.bulletDraw()
         if (!m.isTimeDilated) b.bulletDo()
-        if (net.mode === 'coop') net.clientBulletHits()
+        if (net.mode === 'coop') { net.clientBulletHits(); net.clientBodyHits(); net.clientGrabPowerUps() }
         else if (net.pvp) net.pvp.bulletHits()
+        // clients never own real power up bodies (they render host ghosts); drop any a local
+        // effect spawned (e.g. heal overflow / Casimir) so they don't pile up invisibly.
+        if (powerUp.length) { for (let i = powerUp.length - 1; i >= 0; i--) Matter.Composite.remove(engine.world, powerUp[i]); powerUp.length = 0 }
         simulation.drawCircle()
         simulation.runEphemera()
         if (net.mode === 'pvp' && net.pvp) net.pvp.frame()
         ctx.restore()
         simulation.drawCursor()
         net.drawOverlay()
-        if (simulation.cycle % net.TICK === 0) net.sendSelf()
+        if (simulation.cycle % net.TICK === 0) { net.sendSelf(); if (net.mode === 'coop') net.flushStandinDamage() }
         net.updateHUD()
     },
 
@@ -498,17 +575,227 @@ const net = {
         }
     },
 
-    // ---- rendering (all in world space, camera already applied) ------------
-    drawGeometry() {
-        if (!net.geoBodies.length) return
+    // ---- power up pickup (client claims a ghost power up; host arbitrates) ----
+    // client: look for nearby ghost power ups and ASK the host to grab them (host is authoritative
+    // so two players can't claim the same one).  the effect is applied locally on pickupOk.
+    clientGrabPowerUps() {
+        if (!m.alive || simulation.isChoosing || simulation.paused) return
+        const range2 = input.field ? m.grabPowerUpRange2 : 17000 // field reaches further, otherwise grab on contact
+        for (const p of net.ghostPowerups) {
+            if (p.id == null || net._pendingPickups[p.id]) continue
+            if (p.ty === 'heal' && !(m.maxHealth - m.health > 0.01 || tech.isOverHeal)) continue // don't waste heals at full health
+            if (p.ty === 'ammo' && tech.isEnergyNoAmmo) continue
+            const dx = m.pos.x - p.x, dy = m.pos.y - p.y
+            if (dx * dx + dy * dy < range2) {
+                net._pendingPickups[p.id] = { cycle: simulation.cycle, ty: p.ty, x: p.x, y: p.y, s: p.s || 10 }
+                net.send({ t: 'pickup', id: p.id, by: net.myId })
+            }
+        }
+        // expire requests the host never answered (dropped packet / host gone) so they can be retried
+        for (const id in net._pendingPickups) {
+            if (simulation.cycle - net._pendingPickups[id].cycle > 120) delete net._pendingPickups[id]
+        }
+    },
+    // host: a client asked to grab power up `id`.  consume it (once) and tell everyone who got it.
+    hostHandlePickup(msg) {
+        for (let i = 0, len = powerUp.length; i < len; i++) {
+            if (powerUp[i].netId === msg.id) {
+                Matter.Composite.remove(engine.world, powerUp[i])
+                powerUp.splice(i, 1)
+                net.send({ t: 'pickupOk', id: msg.id, by: msg.by })
+                return
+            }
+        }
+        net.send({ t: 'pickupOk', id: msg.id, by: -1 }) // already gone — just clear it on the requester
+    },
+    // everyone: a power up was consumed.  drop the ghost; if it was mine, apply the effect locally.
+    applyPickupOk(msg) {
+        net.ghostPowerups = net.ghostPowerups.filter(p => p.id !== msg.id)
+        const info = net._pendingPickups[msg.id]
+        delete net._pendingPickups[msg.id]
+        if (msg.by === net.myId && info) net.applyPowerUpEffect(info)
+    },
+    // run a power up's real effect on the local player using a lightweight power-up-like object
+    // (the effects read this.size / this.position, so we can't call powerUps[ty].effect() directly)
+    applyPowerUpEffect(info) {
+        const ty = info.ty
+        if (!powerUps[ty] || typeof powerUps[ty].effect !== 'function') return
+        const who = {
+            name: ty, size: info.s, position: { x: info.x, y: info.y },
+            velocity: { x: 0, y: 0 }, mass: 1, cycle: 999, isDuplicated: false,
+            effect: powerUps[ty].effect
+        }
+        try {
+            if (powerUps.onPickUp) powerUps.onPickUp(who)
+            who.effect()
+        } catch (e) { console.warn('net: client power up effect failed', ty, e && e.message) }
+    },
+
+    // ---- client weapon damage: off-world stand-in mobs --------------------------
+    // The joiner's explosions / lasers / field / DoT iterate the global mob[] array and call
+    // mob[i].damage().  We keep a lightweight stand-in body per host mob in mob[] (NOT in
+    // engine.world, so the physics engine and its collision handler never touch it) whose damage()
+    // just forwards to the host.  Direct bullets stay on net.clientBulletHits (proximity).
+    syncStandin(o) {
+        if (net.mode !== 'coop' || net.role !== 'client') return
+        let s = net.standins[o.i]
+        if (!s) {
+            const sides = Math.max(3, Math.min(12, o.s || 6))
+            try {
+                s = Matter.Bodies.polygon(o.x, o.y, sides, o.r || 20, {
+                    isStatic: true, isSensor: true, collisionFilter: { category: 0, mask: 0 }
+                })
+            } catch (e) { return }
+            s.isNetGhost = true
+            s.netId = o.i
+            s.alive = true
+            s.radius = o.r || 20
+            s.leaveBody = false
+            s.isDropPowerUp = false
+            s.isBoss = false
+            s.isInvulnerable = false
+            s.shield = false
+            s.memory = 0
+            s.damageReduction = 1 // truthy so weapons that gate on it (e.g. laser) still deal damage
+            s.seePlayer = { recall: 0, yes: false, position: { x: 0, y: 0 } }
+            s.status = []
+            s.foundPlayer = function () { }
+            s.locatePlayer = function () { }
+            s.distanceToPlayer2 = function () { return 1e9 }
+            s.damageScale = function () { return 1 }
+            s.death = function () { this.alive = false }
+            s.do = function () { }
+            s._pendingDmg = 0
+            s.damage = function (dmg) { // forward to host instead of applying locally
+                if (!this.alive || !(dmg > 0)) return
+                this._pendingDmg += dmg
+            }
+            net.standins[o.i] = s
+            mob.push(s)
+        }
+        // refresh state from the snapshot
+        s.health = o.h
+        s.alive = o.h > 0
+        s.fill = o.f
+        s.isShielded = !!(o.fl & 1)
+        s.isStunned = !!(o.fl & 2)
+        s.isSlowed = !!(o.fl & 4)
+        s.isMobBullet = !!(o.fl & 16)
+        try { Matter.Body.setPosition(s, { x: o.x, y: o.y }); Matter.Body.setAngle(s, o.a) } catch (e) { }
+    },
+    removeStandin(id) {
+        const s = net.standins[id]
+        if (!s) return
+        const idx = mob.indexOf(s)
+        if (idx !== -1) mob.splice(idx, 1)
+        delete net.standins[id]
+    },
+    clearStandins() {
+        for (const id in net.standins) net.removeStandin(id)
+        net.standins = {}
+    },
+    // once per network tick: forward the damage the joiner's weapons dealt to each stand-in
+    flushStandinDamage() {
+        for (const id in net.standins) {
+            const s = net.standins[id]
+            if (s._pendingDmg > 0) {
+                net.send({ t: 'hit', i: Number(id), d: Math.round(s._pendingDmg * 1000) / 1000 })
+                s._pendingDmg = 0
+            }
+        }
+    },
+    // client: my thrown / printed blocks (local body[]) hitting host ghost mobs -> report damage
+    clientBodyHits() {
+        if (!body.length) return
+        for (let bi = 0; bi < body.length; bi++) {
+            const o = body[bi]
+            if (!o || o.speed === undefined || o.speed < 8) continue
+            for (const id in net.ghostMobs) {
+                const g = net.ghostMobs[id]
+                const dx = g.rx - o.position.x, dy = g.ry - o.position.y
+                const rad = (g.r || 20) + (o.circleRadius || 14)
+                if (dx * dx + dy * dy < rad * rad) {
+                    const dmg = (typeof tech !== 'undefined' && tech.blockDamage ? tech.blockDamage : 0.06) * o.speed * (o.mass || 1) * 0.04
+                    net.send({ t: 'hit', i: Number(id), d: Math.round(Math.min(dmg, 5) * 1000) / 1000 })
+                    break
+                }
+            }
+        }
+    },
+
+    // ---- dynamic bodies (crates/blocks + body-based level mechanisms) -----------
+    syncGhostBodies(list) {
+        if (net.mode !== 'coop' || net.role !== 'client' || typeof Matter === 'undefined') return
+        const seen = {}
+        for (const o of list) {
+            if (!o.v || o.v.length < 3) continue
+            seen[o.i] = true
+            let gb = net.ghostBodies[o.i]
+            // centroid of the polygon
+            let cx = 0, cy = 0
+            for (const p of o.v) { cx += p[0]; cy += p[1] }
+            cx /= o.v.length; cy /= o.v.length
+            if (!gb) {
+                try {
+                    const pts = o.v.map(p => ({ x: p[0], y: p[1] }))
+                    const b2 = Matter.Bodies.fromVertices(cx, cy, [pts], {
+                        isStatic: true, collisionFilter: { category: cat.body, mask: 0xFFFFFFFF }
+                    }, true)
+                    if (!b2) continue
+                    b2.isNetGhostBody = true
+                    Matter.World.add(engine.world, b2)
+                    gb = net.ghostBodies[o.i] = { body: b2, rx: cx, ry: cy }
+                } catch (e) { continue }
+            }
+            gb.x = cx; gb.y = cy; gb.lastSeen = simulation.cycle
+            // smooth toward the new position so synced platforms don't teleport the standing player
+            gb.rx += (gb.x - gb.rx) * net.SMOOTH
+            gb.ry += (gb.y - gb.ry) * net.SMOOTH
+            try { Matter.Body.setPosition(gb.body, { x: gb.rx, y: gb.ry }) } catch (e) { }
+        }
+        for (const i in net.ghostBodies) if (!seen[i]) net.removeGhostBody(i)
+    },
+    removeGhostBody(i) {
+        const gb = net.ghostBodies[i]
+        if (!gb) return
+        try { Matter.World.remove(engine.world, gb.body) } catch (e) { }
+        delete net.ghostBodies[i]
+    },
+    clearGhostBodies() {
+        for (const i in net.ghostBodies) net.removeGhostBody(i)
+        net.ghostBodies = {}
+    },
+    drawGhostBodies() {
+        let any = false
         ctx.beginPath()
-        for (const b2 of net.geoBodies) {
-            const v = b2.vertices
+        for (const i in net.ghostBodies) {
+            const v = net.ghostBodies[i].body.vertices
             ctx.moveTo(v[0].x, v[0].y)
             for (let j = 1; j < v.length; j++) ctx.lineTo(v[j].x, v[j].y)
             ctx.lineTo(v[0].x, v[0].y)
+            any = true
         }
+        if (!any) return
         ctx.fillStyle = color.block
+        ctx.fill()
+        ctx.strokeStyle = color.blockS
+        ctx.lineWidth = 2
+        ctx.stroke()
+    },
+
+    // ---- rendering (all in world space, camera already applied) ------------
+    drawGeometry() {
+        if (!net.geoPolys.length) return
+        // draw the exact host map polygons (not the convex-decomposed collision bodies) with the
+        // real map color so platforms match the host instead of looking washed-out.
+        ctx.beginPath()
+        for (const poly of net.geoPolys) {
+            if (poly.length < 2) continue
+            ctx.moveTo(poly[0][0], poly[0][1])
+            for (let j = 1; j < poly.length; j++) ctx.lineTo(poly[j][0], poly[j][1])
+            ctx.lineTo(poly[0][0], poly[0][1])
+        }
+        ctx.fillStyle = color.map
         ctx.fill()
         ctx.strokeStyle = color.blockS
         ctx.lineWidth = 1
@@ -522,11 +809,12 @@ const net = {
     drawGhostMobs() {
         for (const id in net.ghostMobs) {
             const g = net.ghostMobs[id]
-            if (g.lastSeen !== undefined && simulation.cycle - g.lastSeen > 300) { delete net.ghostMobs[id]; continue } // host stopped sending -> expire
+            if (g.lastSeen !== undefined && simulation.cycle - g.lastSeen > 300) { net.removeStandin(id); delete net.ghostMobs[id]; continue } // host stopped sending -> expire
             g.rx += (g.x - g.rx) * net.SMOOTH
             g.ry += (g.y - g.ry) * net.SMOOTH
             g.ra += (g.a - g.ra) * net.SMOOTH
             const sides = Math.max(3, g.sides || 6), r = g.r || 20
+            const fl = g.fl || 0
             ctx.beginPath()
             for (let k = 0; k < sides; k++) {
                 const ang = g.ra + k / sides * 2 * Math.PI
@@ -536,9 +824,15 @@ const net = {
             ctx.closePath()
             ctx.fillStyle = g.fill || "#888"
             ctx.fill()
-            ctx.strokeStyle = "#000"
-            ctx.lineWidth = 2
+            if (fl & 2) { ctx.fillStyle = "rgba(255,255,0,0.25)"; ctx.fill() }       // stun tint
+            ctx.strokeStyle = (fl & 4) ? "rgba(0,100,255,0.85)" : "#000"             // slow -> blue outline
+            ctx.lineWidth = (fl & 4) ? 4 : 2
             ctx.stroke()
+            if (fl & 1) { // shield bubble
+                ctx.beginPath(); ctx.arc(g.rx, g.ry, r * 1.3, 0, 2 * Math.PI)
+                ctx.fillStyle = "rgba(220,220,255,0.25)"; ctx.fill()
+                ctx.strokeStyle = "#8cf"; ctx.lineWidth = 2; ctx.stroke()
+            }
             if (g.h < 0.99) { // health bar
                 const w = r * 2, x = g.rx - r, y = g.ry - r * 1.5
                 ctx.fillStyle = "rgba(100,100,100,0.3)"; ctx.fillRect(x, y, w, r * 0.3)
@@ -546,13 +840,61 @@ const net = {
             }
         }
     },
+    // real powerup colors so ghost powerups match the host (see js/powerup.js per-type `color`)
+    _puColor: {
+        heal: "#0eb", ammo: "#467", field: "#0cf", gun: "#26a", tech: "hsl(246,100%,77%)",
+        coupling: "#0ae", boost: "#f55", research: "#f7b", Casimir: "#ff0", entanglement: "#fff"
+    },
     drawGhostPowerups() {
+        if (!net.ghostPowerups.length) return
+        ctx.globalAlpha = 0.4 * Math.sin(simulation.cycle * 0.15) + 0.6 // pulse, like powerUps.drawCircle
         for (const p of net.ghostPowerups) {
             ctx.beginPath()
-            ctx.arc(p.x, p.y, 9, 0, 2 * Math.PI)
-            ctx.fillStyle = p.ty === 'heal' ? "#0d0" : p.ty === 'ammo' ? "#fc0" : "#9cf"
+            ctx.arc(p.x, p.y, p.s || 9, 0, 2 * Math.PI)
+            ctx.fillStyle = net._puColor[p.ty] || "#9cf"
             ctx.fill()
         }
+        ctx.globalAlpha = 1
+    },
+    // remote-player leg IK (mirrors m.calcLeg / player constants: legLength1 55, legLength2 45, hip 12/24, height 42)
+    _LEG: { L1: 55, L2: 45, HIPX: 12, HIPY: 24, HEIGHT: 42 },
+    _calcLeg(p, cycleOffset, offset) {
+        const L = net._LEG
+        const hipx = L.HIPX + offset, hipy = L.HIPY + offset
+        const stepAngle = 0.034 * p.walk + cycleOffset
+        let footx = 2.2 * p.stepSize * Math.cos(stepAngle) + offset
+        let footy = offset + 1.2 * p.stepSize * Math.sin(stepAngle) + p.yo + L.HEIGHT
+        const Ymax = p.yo + L.HEIGHT
+        if (footy > Ymax) footy = Ymax
+        const d = Math.sqrt((hipx - footx) * (hipx - footx) + (hipy - footy) * (hipy - footy)) || 0.0001
+        const l = (L.L1 * L.L1 - L.L2 * L.L2 + d * d) / (2 * d)
+        const h = Math.sqrt(Math.max(0, L.L1 * L.L1 - l * l))
+        const kneex = (l / d) * (footx - hipx) - (h / d) * (footy - hipy) + hipx + offset
+        const kneey = (l / d) * (footy - hipy) + (h / d) * (footx - hipx) + hipy
+        return { hipx, hipy, kneex, kneey, footx, footy }
+    },
+    _drawLeg(p, leg, stroke, fillColor) {
+        ctx.save()
+        ctx.scale(p.flip, 1)
+        // thigh + shin
+        ctx.beginPath()
+        ctx.moveTo(leg.hipx, leg.hipy); ctx.lineTo(leg.kneex, leg.kneey); ctx.lineTo(leg.footx, leg.footy)
+        ctx.strokeStyle = stroke; ctx.lineWidth = 5; ctx.stroke()
+        // toes (splayed when grounded, tucked when airborne)
+        ctx.beginPath(); ctx.moveTo(leg.footx, leg.footy)
+        if (p.og) {
+            ctx.lineTo(leg.footx - 14, leg.footy + 5); ctx.moveTo(leg.footx, leg.footy); ctx.lineTo(leg.footx + 14, leg.footy + 5)
+        } else {
+            ctx.lineTo(leg.footx - 12, leg.footy + 8); ctx.moveTo(leg.footx, leg.footy); ctx.lineTo(leg.footx + 12, leg.footy + 8)
+        }
+        ctx.lineWidth = 4; ctx.stroke()
+        // hip / knee / foot joints
+        ctx.beginPath()
+        ctx.arc(leg.hipx, leg.hipy, 9, 0, 2 * Math.PI)
+        ctx.moveTo(leg.kneex + 5, leg.kneey); ctx.arc(leg.kneex, leg.kneey, 5, 0, 2 * Math.PI)
+        ctx.moveTo(leg.footx + 4, leg.footy + 1); ctx.arc(leg.footx, leg.footy + 1, 4, 0, 2 * Math.PI)
+        ctx.fillStyle = fillColor; ctx.fill(); ctx.lineWidth = 2; ctx.stroke()
+        ctx.restore()
     },
     drawRemotePlayers() {
         for (const id in net.players) {
@@ -561,23 +903,33 @@ const net = {
             if (simulation.cycle - p.lastSeen > 240) continue // stale -> hide
             p.rx += (p.x - p.rx) * net.SMOOTH
             p.ry += (p.y - p.ry) * net.SMOOTH
+            // advance the walk animation locally, exactly like the host (walk_cycle += flipLegs * Vx)
+            p.flip = (p.a > -Math.PI / 2 && p.a < Math.PI / 2) ? 1 : -1
+            p.walk += p.flip * (p.vx || 0)
+            p.stepSize = 0.8 * p.stepSize + 0.2 * (7 * Math.sqrt(Math.min(9, Math.abs(p.vx || 0))) * (p.og ? 1 : 0))
             const cFill = `hsl(${p.color.hue},${p.color.sat}%,${p.color.light}%)`
-            const cDark = `hsl(${p.color.hue},${p.color.sat}%,${Math.max(0, p.color.light - 30)}%)`
+            const cDark = `hsl(${p.color.hue},${p.color.sat}%,${Math.max(0, p.color.light - 25)}%)`
             ctx.save()
             ctx.translate(p.rx, p.ry)
-            // simple legs
-            ctx.strokeStyle = "#333"; ctx.lineWidth = 6
-            ctx.beginPath(); ctx.moveTo(-8, 0); ctx.lineTo(-12, 22); ctx.moveTo(8, 0); ctx.lineTo(12, 22); ctx.stroke()
-            // body
+            // legs (rear then front), drawn before the body rotates — same as m.skin.defaultDraw
+            net._drawLeg(p, net._calcLeg(p, Math.PI, -3), "#4a4a4a", cFill)
+            net._drawLeg(p, net._calcLeg(p, 0, 0), "#333", cFill)
+            // body + aim "eye", oriented to the player's look angle
             ctx.rotate(p.a)
+            const grd = ctx.createLinearGradient(-30, 0, 30, 0)
+            grd.addColorStop(0, cDark); grd.addColorStop(1, cFill)
             ctx.beginPath(); ctx.arc(0, 0, 30, 0, 2 * Math.PI)
-            ctx.fillStyle = cFill; ctx.fill()
-            ctx.strokeStyle = cDark; ctx.lineWidth = 4; ctx.stroke()
-            // gun direction nub
-            ctx.beginPath(); ctx.arc(20, 0, 6, 0, 2 * Math.PI); ctx.fillStyle = "#333"; ctx.fill()
-            // field shimmer
-            if (p.fo) { ctx.beginPath(); ctx.arc(0, 0, 50, 0, 2 * Math.PI); ctx.strokeStyle = `hsla(${p.color.hue},100%,70%,0.4)`; ctx.lineWidth = 3; ctx.stroke() }
+            ctx.fillStyle = grd; ctx.fill()
+            ctx.arc(15, 0, 4, 0, 2 * Math.PI)
+            ctx.strokeStyle = "#333"; ctx.lineWidth = 2; ctx.stroke()
             ctx.restore()
+            // energy field bubble (pulsing) when the field is up
+            if (p.fo) {
+                const pulse = 46 + 4 * Math.sin(simulation.cycle * 0.2)
+                ctx.beginPath(); ctx.arc(p.rx, p.ry, pulse, 0, 2 * Math.PI)
+                ctx.fillStyle = `hsla(${p.color.hue},100%,70%,0.06)`; ctx.fill()
+                ctx.strokeStyle = `hsla(${p.color.hue},100%,70%,0.5)`; ctx.lineWidth = 3; ctx.stroke()
+            }
             // health ring + label
             ctx.beginPath(); ctx.arc(p.rx, p.ry, 38, -Math.PI / 2, -Math.PI / 2 + 2 * Math.PI * Math.max(0, Math.min(1, p.h)))
             ctx.strokeStyle = p.h > 0.3 ? "#3d8" : "#e44"; ctx.lineWidth = 4; ctx.stroke()
